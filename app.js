@@ -127,7 +127,8 @@ var state = {
   autoRestart: true, restartTimeout: null,
   lastInput: '', lastResponse: '',
   conversationHistory: [], currentUtterance: null,
-  speechSupported: true, inputMode: 'voice', bestArabicVoice: null
+  speechSupported: true, inputMode: 'voice', bestArabicVoice: null,
+  visualizerRunning: false, visualizerRAF: null
 };
 
 var DOM = {};
@@ -167,12 +168,24 @@ window.addEventListener('DOMContentLoaded', function() {
 });
 
 function initApp() {
-  createVizBars();
-  detectBestVoice();
-  var SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-  if (!SR) { state.speechSupported = false; enableTextMode(); }
-  else { initSpeechRecognition(); setTimeout(function() { startListening(); }, 800); }
-  setupEventListeners();
+  try {
+    createVizBars();
+    detectBestVoice();
+    var SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SR) { 
+      console.warn('Speech Recognition API not supported');
+      state.speechSupported = false; 
+      enableTextMode(); 
+    }
+    else { 
+      initSpeechRecognition(); 
+      setTimeout(function() { startListening(); }, 800); 
+    }
+    setupEventListeners();
+  } catch(e) {
+    console.error('App initialization error:', e);
+    showError('خطأ في تهيئة التطبيق. حاول تحديث الصفحة.');
+  }
 }
 
 function detectBestVoice() {
@@ -257,14 +270,24 @@ function restartListening() {
 function startListening() {
   if (!state.recognition) return;
   state.autoRestart = true;
-  try { state.recognition.start(); } catch(e) {}
+  try { 
+    state.recognition.start(); 
+  } catch(e) { 
+    console.error('Failed to start speech recognition:', e);
+  }
   initAudioVisualizer();
 }
 
 function stopListening() {
   state.autoRestart = false;
   clearTimeout(state.restartTimeout);
-  if (state.recognition) { try { state.recognition.stop(); } catch(e) {} }
+  if (state.recognition) { 
+    try { 
+      state.recognition.stop(); 
+    } catch(e) { 
+      console.error('Error stopping speech recognition:', e);
+    }
+  }
   state.isListening = false;
   if (DOM.micBtn) DOM.micBtn.classList.remove('listening');
   if (DOM.micIcon) DOM.micIcon.textContent = '🎤';
@@ -281,17 +304,23 @@ async function initAudioVisualizer() {
     var mic = state.audioContext.createMediaStreamSource(stream);
     mic.connect(state.analyser);
     animateVisualizer();
-  } catch(e) {}
+  } catch(e) {
+    console.error('Audio visualizer error:', e);
+  }
 }
 
 function animateVisualizer() {
-  if (!state.analyser) return;
+  if (!state.analyser || state.visualizerRunning) return;
+  state.visualizerRunning = true;
   var bufLen = state.analyser.frequencyBinCount;
   var data = new Uint8Array(bufLen);
   var bars = document.querySelectorAll('.viz-bar-item');
   function draw() {
-    requestAnimationFrame(draw);
-    if (!state.analyser) return;
+    state.visualizerRAF = requestAnimationFrame(draw);
+    if (!state.analyser) {
+      state.visualizerRunning = false;
+      return;
+    }
     state.analyser.getByteFrequencyData(data);
     bars.forEach(function(bar, i) {
       var val = data[Math.floor((i / bars.length) * bufLen)] || 0;
@@ -357,11 +386,13 @@ async function callOpenRouterAI(userMessage) {
     if (!response.ok) {
       var err = new Error(data.error || 'خطأ في الاتصال');
       err.code = data.code || 'API_ERROR';
+      console.error('API error:', err.message, 'Code:', err.code);
       throw err;
     }
     return data.reply;
   } catch(e) {
     clearTimeout(timeoutId);
+    console.error('OpenRouter API call failed:', e);
     if (e.name === 'AbortError') { var te = new Error('timeout'); te.code = 'TIMEOUT'; throw te; }
     if (!navigator.onLine) { var oe = new Error('offline'); oe.code = 'OFFLINE'; throw oe; }
     throw e;
@@ -385,21 +416,69 @@ function getFallbackResponse(code) {
 function delay(ms) { return new Promise(function(resolve) { setTimeout(resolve, ms); }); }
 
 // ===== Text To Speech =====
-function speakText(text) {
-  if (!state.synthesis) { afterSpeak(); return; }
-  state.synthesis.cancel();
-  // تنظيف النص من كل ما لا يُنطق
+async function speakTextGoogle(text) {
+  // محاولة استخدام Google TTS (صوت حقيقي احترافي)
   var clean = text
-    .replace(/[\u{1F000}-\u{1FFFF}]/gu, '')   // إيموجي
-    .replace(/[\u2600-\u27BF]/g, '')            // رموز متنوعة
-    .replace(/[*_~#`]/g, '')                    // ماركداون
-    .replace(/\d+\./g, '')                      // أرقام مع نقطة (1. 2. 3.)
-    .replace(/[،,]/g, ' ')                      // فواصل
-    .replace(/[:]/g, ' ')                       // نقطتان
-    .replace(/\n+/g, ' ')                       // أسطر جديدة
+    .replace(/[\u{1F000}-\u{1FFFF}]/gu, '')
+    .replace(/[\u2600-\u27BF]/g, '')
+    .replace(/[*_~#`]/g, '')
+    .replace(/\d+\./g, '')
+    .replace(/[،,]/g, ' ')
+    .replace(/[:]/g, ' ')
+    .replace(/\n+/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
+  
   if (!clean) { afterSpeak(); return; }
+  
+  try {
+    // استخدام eSpeak API (مجاني تماماً، صوت طبيعي)
+    var googleTtsUrl = 'https://translate.google.com/translate_tts?ie=UTF-8&q=' + 
+      encodeURIComponent(clean) + '&tl=ar&client=tw-ob';
+    
+    var audio = new Audio(googleTtsUrl);
+    state.isSpeaking = true;
+    updateStatus('speaking');
+    if (DOM.avatarMouth) DOM.avatarMouth.classList.add('talking');
+    if (DOM.soundWaves) DOM.soundWaves.classList.add('active');
+    
+    audio.onended = function() { 
+      afterSpeak(); 
+    };
+    
+    audio.onerror = function() {
+      console.warn('Google TTS failed, falling back to browser TTS');
+      speakTextBrowser(text);
+    };
+    
+    audio.play().catch(function(e) {
+      console.warn('Audio play failed:', e);
+      speakTextBrowser(text);
+    });
+  } catch(e) {
+    console.error('Google TTS error:', e);
+    speakTextBrowser(text);
+  }
+}
+
+function speakTextBrowser(text) {
+  // Fallback: صوت المتصفح العادي
+  if (!state.synthesis) { afterSpeak(); return; }
+  state.synthesis.cancel();
+  
+  var clean = text
+    .replace(/[\u{1F000}-\u{1FFFF}]/gu, '')
+    .replace(/[\u2600-\u27BF]/g, '')
+    .replace(/[*_~#`]/g, '')
+    .replace(/\d+\./g, '')
+    .replace(/[،,]/g, ' ')
+    .replace(/[:]/g, ' ')
+    .replace(/\n+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  
+  if (!clean) { afterSpeak(); return; }
+  
   var utt = new SpeechSynthesisUtterance(clean);
   utt.lang = 'ar-SA'; utt.rate = 0.90; utt.pitch = 1.05; utt.volume = 1.0;
   if (state.bestArabicVoice) utt.voice = state.bestArabicVoice;
@@ -407,16 +486,44 @@ function speakText(text) {
   updateStatus('speaking');
   if (DOM.avatarMouth) DOM.avatarMouth.classList.add('talking');
   if (DOM.soundWaves) DOM.soundWaves.classList.add('active');
+  
   var ended = false;
-  function onEnd() { if (!ended) { ended = true; clearInterval(resumeTimer); afterSpeak(); } }
+  function onEnd() { 
+    if (!ended) { 
+      ended = true; 
+      if (resumeTimer) clearInterval(resumeTimer); 
+      afterSpeak(); 
+    } 
+  }
+  
   utt.onend = onEnd;
-  utt.onerror = function(e) { if (e.error !== 'interrupted') onEnd(); };
+  utt.onerror = function(e) { 
+    console.error('Speech synthesis error:', e.error);
+    if (e.error !== 'interrupted') onEnd(); 
+  };
+  
   state.synthesis.speak(utt);
-  // Chrome bug workaround
-  var resumeTimer = setInterval(function() {
-    if (!state.isSpeaking) { clearInterval(resumeTimer); return; }
-    if (state.synthesis.paused) state.synthesis.resume();
+  
+  var resumeTimer = null;
+  resumeTimer = setInterval(function() {
+    if (!state.isSpeaking) { 
+      if (resumeTimer) clearInterval(resumeTimer); 
+      resumeTimer = null;
+      return; 
+    }
+    try {
+      if (state.synthesis && state.synthesis.paused) state.synthesis.resume();
+    } catch(e) {
+      console.error('Error resuming speech:', e);
+      if (resumeTimer) clearInterval(resumeTimer);
+      resumeTimer = null;
+    }
   }, 5000);
+}
+
+function speakText(text) {
+  // اختر الطريقة الأفضل متاحة
+  speakTextGoogle(text);
 }
 
 function afterSpeak() {
@@ -520,8 +627,14 @@ function setupEventListeners() {
       if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendTextInput(); }
     });
   }
-  window.addEventListener('offline', function() { showError('انقطع الاتصال بالإنترنت.'); });
-  window.addEventListener('online', function() { showError('عاد الاتصال بالإنترنت'); });
+  window.addEventListener('offline', function() { 
+    console.warn('Connection lost');
+    showError('انقطع الاتصال بالإنترنت.'); 
+  });
+  window.addEventListener('online', function() { 
+    console.info('Connection restored');
+    showError('عاد الاتصال بالإنترنت'); 
+  });
 }
 
 // ===== جسيمات الخلفية =====
